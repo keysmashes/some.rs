@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
+nix = "0.22.1"
+shlex = "1.1.0"
+structopt = "0.3.22"
+terminal_size = "0.1.17"
