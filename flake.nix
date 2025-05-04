@@ -17,7 +17,7 @@
       cargoSha256 = "sha256-U6fqjOy8GW0hFsoyHz1f2iYRbbsxvLEKDB+rNNKwBhw=";
       meta = {
         description = "a meta-pager";
-        homepage = "https://github.com/sersorrel/some.rs";
+        homepage = "https://github.com/keysmashes/some.rs";
         mainProgram = "some";
       };
     };
