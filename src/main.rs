@@ -18,6 +18,77 @@ struct Opt {
     filename: Option<PathBuf>,
 }
 
+/// Get the length of a string in characters as if it were rendered in an infinitely-wide terminal.
+///
+/// This will only ever be an approximation. Currently we only interpret SGR escape sequences.
+fn visible_length(buf: &[u8]) -> usize {
+    enum State {
+        /// Regular text.
+        Normal,
+        /// We have seen an ESC (`\x1b`) and are expecting a `[`.
+        Esc,
+        /// We have seen the first half of a CSI in UTF-8 (`0xc2`) and are expecting the second
+        /// half (`0x9b`).
+        Csi,
+        /// We have seen a CSI, and we're counting how many characters we've seen so far (including
+        /// the leading ones) in case we don't recognise the sequence we end up with.
+        MidSequence(usize),
+    }
+    let mut state = State::Normal;
+    buf
+        .iter()
+        .map(|c| match (&mut state, c) {
+            (State::Normal, b'\x1b') => { state = State::Esc; 0 },
+            (State::Normal, 0xc2) => { state = State::Csi; 0 },
+            (State::Normal, _) => 1,
+            (State::Esc, b'[') => { state = State::MidSequence(2); 0 },
+            (State::Esc, _) => { state = State::Normal; 2 },
+            (State::Csi, 0x9b) => { state = State::MidSequence(2); 0 },
+            (State::Csi, _) => { state = State::Normal; 2 },
+            (State::MidSequence(pos), b'0'..=b'9' | b';') => { state = State::MidSequence(*pos + 1); 0 },
+            (State::MidSequence(_), b'm') => { state = State::Normal; 0 },
+            // TODO: is it actually the case that unrecognised sequences will be printed verbatim?
+            // (If nothing else, the ESC/CSI probably doesn't take up any width.)
+            (State::MidSequence(pos), _) => { let pos = *pos; state = State::Normal; pos + 1 },
+        })
+        .sum::<usize>()
+        + match state {
+            State::Normal => 0,
+            State::Esc | State::Csi => 1,
+            State::MidSequence(pos) => pos,
+        }
+}
+
+#[cfg(test)]
+mod visible_length {
+    use super::visible_length;
+
+    #[test]
+    fn basic() {
+        assert_eq!(visible_length(b""), 0);
+        assert_eq!(visible_length(b"abc"), 3);
+    }
+
+    #[test]
+    fn escapes() {
+        assert_eq!(visible_length(b"\x1b[1mfoo\x1b[0m bar"), 7);
+        assert_eq!(visible_length(b"\x1b[1;2m"), 0);
+    }
+
+    #[test]
+    fn unterminated_escapes() {
+        assert_eq!(visible_length(b"\x1b"), 1);
+        assert_eq!(visible_length(b"\x1b["), 2);
+        assert_eq!(visible_length(b"\x1b[39"), 4);
+    }
+
+    #[test]
+    fn unrecognised_escapes() {
+        assert_eq!(visible_length(b"\x1b[foo"), 5);
+        assert_eq!(visible_length(b"\x1b[1;2z"), 6);
+    }
+}
+
 fn lines_used(buf: &[u8], width: usize) -> usize {
     // There are a bunch of different approaches we could take here.
     //
@@ -42,15 +113,19 @@ fn lines_used(buf: &[u8], width: usize) -> usize {
     // check the length of each line; however, even that would be [imperfect][1], and would
     // probably be significantly slower than the simpler solutions.
     //
-    // Ultimately the solution we use accounts for lines wrapping, but does not take into account
-    // the possibility that characters may not be displayed in exactly one column. This means that,
-    // if double-width characters are used extensively, the pager may not be invoked when it should
-    // be, and that conversely, if many escape codes are used that take up no screen space, the
-    // pager may be invoked too eagerly. This feels like a reasonable compromise.
+    // We can at least deal with escape sequences, by stripping known ones (primarily the SGR
+    // sequences, `CSI ... m`).
+    //
+    // Ultimately the solution we use accounts for lines wrapping, and makes a best-effort attempt
+    // to deal with escape sequences, but does not take into account the possibility that
+    // characters may be displayed in more than one column. This means that, if double-width
+    // characters are used extensively, the pager may not be invoked when it should be, and that
+    // conversely, if many unusual escape codes are used, the pager may be invoked too eagerly.
+    // This feels like a reasonable compromise.
     //
     // [1]: https://github.com/unicode-rs/unicode-width/issues/4
     buf.split(|c| *c == b'\n')
-        .map(|line| (line.len().saturating_sub(1)) / width + 1)
+        .map(|line| (visible_length(line).saturating_sub(1)) / width + 1)
         .sum()
 }
 
@@ -73,6 +148,11 @@ mod lines_used {
     #[test]
     fn empty_string_takes_one_line() {
         assert_eq!(lines_used(b"", 100), 1);
+    }
+
+    #[test]
+    fn sgr_escapes_ignored() {
+        assert_eq!(lines_used(b"\x1b[1mfoo\x1b[22m and \x1b[38;5;8mbar\x1b[39m", 11), 1);
     }
 }
 
